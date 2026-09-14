@@ -124,9 +124,15 @@ def runCrawler():
         # menuitem_label is the specific brand/collection/filter link just clicked
         # (e.g. "Babolat"), not the actual product category. The page's own
         # breadcrumb ("Home > Tennis Rackets > Babolat") has the real category
-        # as its second entry, so prefer that when the click succeeded.
+        # as its second entry. Menu entries that aren't real category pages
+        # (brand quick-filters, junior size filters) don't have this breadcrumb
+        # level at all - falling back to menuitem_label for those just mislabels
+        # products as a brand name or size filter instead of a category, so skip
+        # them entirely rather than scrape them under a bogus category.
         breadcrumb_category = driver.find_elements(By.XPATH, '//div[@class="breadcrumb-content"]//ul/li[2]/a')
-        prodcat = breadcrumb_category[0].text if breadcrumb_category else menuitem_label
+        if not breadcrumb_category:
+            continue
+        prodcat = breadcrumb_category[0].text
 
         product_names = []
         product_prices = []
