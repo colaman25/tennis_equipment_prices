@@ -1,9 +1,10 @@
+import re
 import uuid
 from collections import Counter
 from itertools import combinations
 
 from pymongo import MongoClient, UpdateOne
-from rapidfuzz import fuzz, process
+from rapidfuzz import fuzz
 
 import config
 from data import loadProducts
@@ -13,6 +14,45 @@ MONGODB_MAPPING_COLLECTION = 'product_mapping'
 
 # rapidfuzz score is 0-100.
 SIMILARITY_THRESHOLD = 85
+
+# token_set_ratio scores a short generic name as a *perfect* match against any
+# longer name that contains it (e.g. "Pure Drive" vs "Pure Drive Junior 26
+# Gen 11 Tennis Racket - Blue" scores 100), because it only measures whether
+# the shorter name's words are a subset of the longer one's - it's blind to
+# the fact that the extra word is exactly what makes it a different, cheaper,
+# different-audience racket. Confirmed against real mismatches in production
+# data (Pure Drive/Junior, EZONE 98/Plus, CX 400/Tour). A pair is disqualified
+# regardless of fuzzy score when one side has a word from one of these groups
+# and the other side has none of that group's synonyms.
+VARIANT_WORD_GROUPS = [
+    {'junior', 'jr', 'kids', 'youth'},
+    {'lite', 'superlite'},
+    {'team'},
+    {'tour'},
+    {'plus'},
+    {'pro'},
+]
+
+# Version/generation markers ("V3.0", "V5", "Gen4", "Gen 11") - if both names
+# carry one and they don't share any marker, they're different model
+# generations described two ways, not the same racket.
+VERSION_PATTERN = re.compile(r'\bv\s?\d+(?:\.\d+)?\b|\bgen\s?\d+\b')
+
+
+def isDisqualified(nameA, nameB):
+    tokensA = set(re.findall(r'[a-z0-9.]+', nameA.lower()))
+    tokensB = set(re.findall(r'[a-z0-9.]+', nameB.lower()))
+
+    for group in VARIANT_WORD_GROUPS:
+        if bool(tokensA & group) != bool(tokensB & group):
+            return True
+
+    versionsA = set(VERSION_PATTERN.findall(nameA.lower()))
+    versionsB = set(VERSION_PATTERN.findall(nameB.lower()))
+    if versionsA and versionsB and versionsA.isdisjoint(versionsB):
+        return True
+
+    return False
 
 
 class UnionFind:
@@ -33,16 +73,19 @@ class UnionFind:
 
 def bestMatchesBetween(rowsA, rowsB):
     # For every item in A, the single highest-scoring item in B (not "anything
-    # above threshold") - top-1 nearest neighbor, keyed by listing_id.
-    namesB = [r['Product Name'] for r in rowsB]
-    idsB = [r['listing_id'] for r in rowsB]
-
+    # above threshold") - top-1 nearest neighbor, keyed by listing_id. Variant-
+    # disqualified candidates are excluded before picking the best, not just
+    # filtered after, so a real match sitting right there isn't shadowed by a
+    # disqualified candidate that token_set_ratio happened to score higher.
     best = {}
     for a in rowsA:
-        match = process.extractOne(a['Product Name'], namesB, scorer=fuzz.token_set_ratio)
-        if match:
-            _, score, idx = match
-            best[a['listing_id']] = (idsB[idx], score)
+        candidates = [
+            (b['listing_id'], fuzz.token_set_ratio(a['Product Name'], b['Product Name']))
+            for b in rowsB
+            if not isDisqualified(a['Product Name'], b['Product Name'])
+        ]
+        if candidates:
+            best[a['listing_id']] = max(candidates, key=lambda c: c[1])
     return best
 
 
