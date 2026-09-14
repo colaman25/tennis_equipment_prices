@@ -23,3 +23,8 @@ jobs:
           python TennisNutsCrawler.py
           python TennisPointCrawler.py
           python TennisWarehouseEuropeCrawler.py
+      - name: Match products across sources
+        working-directory: Crawlers
+        env:
+          MONGO_CNX_STRING: ${{ secrets.MONGO_CNX_STRING }}
+        run: python product_matcher.py
