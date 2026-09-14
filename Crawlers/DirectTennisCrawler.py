@@ -24,6 +24,12 @@ MONGODB_NAME = 'tennis_prod'
 MONGODB_COLLECTION = 'tennisprod'
 SOURCE = 'Direct Tennis UK'
 
+# A crawl that returns far fewer products than usual almost always means the
+# site changed and a selector silently stopped matching, not that inventory
+# actually dropped - fail loudly instead of quietly writing a near-empty
+# run to Mongo, so it surfaces as a GitHub Actions failure email.
+MIN_PRODUCTS_THRESHOLD = 50
+
 # Direct Tennis doesn't expose a brand field on its category listing pages
 # (only per-product detail pages do, via JSON-LD). Rather than pay for an
 # extra page load per product, brand is best-effort guessed by matching the
@@ -192,6 +198,12 @@ def runCrawler():
 
     driver.quit()
     df.to_csv('../data/direct_tennis_products.csv', index=False)
+
+    if len(df) < MIN_PRODUCTS_THRESHOLD:
+        raise RuntimeError(
+            f'{SOURCE}: only {len(df)} products scraped in total, expected at '
+            f'least {MIN_PRODUCTS_THRESHOLD} - likely a broken selector, not a real inventory drop.'
+        )
 
 
 if __name__ == '__main__':

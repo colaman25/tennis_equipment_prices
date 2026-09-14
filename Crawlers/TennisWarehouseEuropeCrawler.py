@@ -79,6 +79,12 @@ BRAND_SUFFIXES = [' Tennis', ' Racquets', ' Racket', ' Apparel', ' Shoes', ' Pad
 PRODUCT_LOAD_TIMEOUT = 15
 PRODUCT_LOAD_POLL_INTERVAL = 0.5
 
+# A crawl that returns far fewer products than usual almost always means the
+# site changed and a selector silently stopped matching, not that inventory
+# actually dropped - fail loudly instead of quietly writing a near-empty
+# run to Mongo, so it surfaces as a GitHub Actions failure email.
+MIN_PRODUCTS_THRESHOLD = 50
+
 
 class AtlasClient ():
 
@@ -277,6 +283,12 @@ def runCrawler():
     output_dir = '../data'
     os.makedirs(output_dir, exist_ok=True)
     df.to_csv(os.path.join(output_dir, 'tenniswarehouseeurope_products.csv'), index=False)
+
+    if len(df) < MIN_PRODUCTS_THRESHOLD:
+        raise RuntimeError(
+            f'{SOURCE}: only {len(df)} products scraped in total, expected at '
+            f'least {MIN_PRODUCTS_THRESHOLD} - likely a broken selector, not a real inventory drop.'
+        )
 
 
 if __name__ == '__main__':
