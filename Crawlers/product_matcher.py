@@ -7,7 +7,7 @@ from pymongo import MongoClient, UpdateOne
 from rapidfuzz import fuzz
 
 import config
-from data import loadProducts
+from data import loadRawProducts
 
 MONGODB_NAME = 'tennis_prod'
 MONGODB_MAPPING_COLLECTION = 'product_mapping'
@@ -31,6 +31,16 @@ VARIANT_WORD_GROUPS = [
     {'tour'},
     {'plus'},
     {'pro'},
+    # A listing for a 2-racket bundle is a different, differently-priced
+    # purchase than a listing for a single racket, even when the rest of the
+    # name is otherwise identical (e.g. "Pure Aero 98 Tennis Racket (Pair)"
+    # vs "Pure Aero 98 Tennis Racket" - confirmed merged in production data).
+    {'pair', 'duo', 'twin', 'two', 'pack', 'bundle', 'multipack'},
+    # Signature-player edition - a genuinely different, differently-priced
+    # racket from the base model it's named after, not just a wording
+    # difference (e.g. "Pure Aero" vs "Pure Aero Rafa Origin ... [Frame Only]"
+    # - confirmed merged in production data).
+    {'rafa'},
 ]
 
 # Version/generation markers ("V3.0", "V5", "Gen4", "Gen 11") - if both names
@@ -38,10 +48,20 @@ VARIANT_WORD_GROUPS = [
 # generations described two ways, not the same racket.
 VERSION_PATTERN = re.compile(r'\bv\s?\d+(?:\.\d+)?\b|\bgen\s?\d+\b')
 
+# Bundle multipliers written as "x2"/"x3" rather than a word ("Pure Aero 98 x2
+# Racket") - same bundle-vs-single concern as the word group above, just a
+# different spelling the word group wouldn't catch.
+BUNDLE_MULTIPLIER_PATTERN = re.compile(r'\bx\d+\b')
+
 
 def isDisqualified(nameA, nameB):
-    tokensA = set(re.findall(r'[a-z0-9.]+', nameA.lower()))
-    tokensB = set(re.findall(r'[a-z0-9.]+', nameB.lower()))
+    # The tokenizer only keeps alphanumerics, so a "+" (the Plus variant,
+    # written "Pure Aero +" rather than "Pure Aero Plus" by some sources)
+    # would otherwise vanish entirely rather than contributing a 'plus' token
+    # - silently defeating the {'plus'} variant-word check above for every
+    # source that spells it this way.
+    tokensA = set(re.findall(r'[a-z0-9.]+', nameA.lower().replace('+', ' plus ')))
+    tokensB = set(re.findall(r'[a-z0-9.]+', nameB.lower().replace('+', ' plus ')))
 
     for group in VARIANT_WORD_GROUPS:
         if bool(tokensA & group) != bool(tokensB & group):
@@ -50,6 +70,11 @@ def isDisqualified(nameA, nameB):
     versionsA = set(VERSION_PATTERN.findall(nameA.lower()))
     versionsB = set(VERSION_PATTERN.findall(nameB.lower()))
     if versionsA and versionsB and versionsA.isdisjoint(versionsB):
+        return True
+
+    hasBundleA = bool(BUNDLE_MULTIPLIER_PATTERN.search(nameA.lower()))
+    hasBundleB = bool(BUNDLE_MULTIPLIER_PATTERN.search(nameB.lower()))
+    if hasBundleA != hasBundleB:
         return True
 
     return False
@@ -145,19 +170,30 @@ def resolveProductIds(clusters, existingMapping):
     # id(s) the cluster's members already had, and only mint a fresh one when
     # none of them have ever been assigned one before.
     mapping = {}
+    claimedIds = set()
+
     for members in clusters:
         priorIds = {existingMapping[m] for m in members if m in existingMapping}
+        availableIds = priorIds - claimedIds
 
-        if not priorIds:
+        if not availableIds:
+            # Either no member had a prior id, or every prior id this cluster
+            # could reuse was already claimed by an earlier cluster processed
+            # in this same run - the latter happens when a group that used to
+            # be one (mis-)matched cluster has since split into several (e.g.
+            # a false-positive match got fixed): every fragment still shares
+            # that one old id, so only the first fragment gets to keep it -
+            # the rest need a fresh id or they'd all collide back onto it.
             productId = uuid.uuid4().hex[:12]
-        elif len(priorIds) == 1:
-            productId = next(iter(priorIds))
+        elif len(availableIds) == 1:
+            productId = next(iter(availableIds))
         else:
             # Members disagree - two previously-separate products are now
             # judged the same. Keep the lowest id deterministically and note it.
-            productId = min(priorIds)
-            print(f"  merging previously-distinct products {sorted(priorIds)} into {productId}")
+            productId = min(availableIds)
+            print(f"  merging previously-distinct products {sorted(availableIds)} into {productId}")
 
+        claimedIds.add(productId)
         for listing_id in members:
             mapping[listing_id] = productId
 
@@ -165,7 +201,13 @@ def resolveProductIds(clusters, existingMapping):
 
 
 def matchProducts():
-    df = loadProducts()
+    # One row per listing_id (every distinct real-world listing), not one row
+    # per existing product_id - the latter (loadProducts()'s view, built for
+    # the Streamlit display) collapses any product that already has multiple
+    # listings down to just its single latest-crawled row, which would make
+    # re-matching structurally blind to every other member of an existing
+    # cluster and unable to ever reconsider it.
+    df = loadRawProducts().sort_values('Time Added').drop_duplicates(subset=['listing_id'], keep='last')
     clusters = findClusters(df)
     existingMapping = loadExistingMapping()
     return resolveProductIds(clusters, existingMapping)
