@@ -37,15 +37,7 @@ def loadProductMapping():
             for doc in collection.find({}, {'_id': 0, 'listing_id': 1, 'product_id': 1})}
 
 
-@st.cache_data(ttl=300)
-def loadRawProducts():
-    # Every crawl run inserts new rows rather than overwriting, so this is the
-    # full historical price log - one row per (product, crawl date). The main
-    # table dedupes this down to latest-only; the detail page needs the full
-    # history to compute things like 52-week min/max.
-    client = MongoClient(config.mongo_cnx_string)
-    collection = client[MONGODB_NAME][MONGODB_COLLECTION]
-    df = pd.DataFrame(list(collection.find({}, {'_id': 0})))
+def _addDerivedColumns(df):
     df['Price (numeric)'] = df['Product Price'].apply(parsePrice)
     df['Time Added'] = pd.to_datetime(df['Time Added'])
     df['listing_id'] = df.apply(lambda r: makeListingId(r['Source'], r['Product URL']), axis=1)
@@ -57,13 +49,51 @@ def loadRawProducts():
     # fall back to being their own product, same as before.
     productMapping = loadProductMapping()
     df['product_id'] = df['listing_id'].map(productMapping).fillna(df['listing_id'])
-
     return df
 
 
 @st.cache_data(ttl=300)
+def loadRawProducts():
+    # Every crawl run inserts new rows rather than overwriting, so this is the
+    # full historical price log - one row per (product, crawl date), now
+    # 200k+ rows and growing every week. Only the detail page's 52-week chart
+    # genuinely needs this (and only for the one product being viewed) -
+    # everything else should use loadLatestListings() instead, which computes
+    # "latest per listing" in MongoDB rather than pulling the entire history
+    # into pandas just to throw most of it away.
+    client = MongoClient(config.mongo_cnx_string)
+    collection = client[MONGODB_NAME][MONGODB_COLLECTION]
+    df = pd.DataFrame(list(collection.find({}, {'_id': 0})))
+    return _addDerivedColumns(df)
+
+
+@st.cache_data(ttl=300)
+def loadLatestListings():
+    # One row per listing (its most recent crawl only), computed server-side
+    # by MongoDB instead of pulling the full multi-month history into memory.
+    # Time Added is stored as a 'YYYY-MM-DD HH:MM:SS' string, which sorts
+    # chronologically as plain text, so a string sort here is correct.
+    client = MongoClient(config.mongo_cnx_string)
+    collection = client[MONGODB_NAME][MONGODB_COLLECTION]
+    # $top sorts within each group only (bounded by that listing's own crawl
+    # count), not the whole collection - a preceding $sort stage over all
+    # 200k+ documents hits Atlas's shared-tier limit (sorts that spill to disk
+    # aren't allowed on M0) and fails outright, even with allowDiskUse=True.
+    pipeline = [
+        {'$group': {
+            '_id': {'Source': '$Source', 'Product URL': '$Product URL'},
+            'doc': {'$top': {'sortBy': {'Time Added': -1}, 'output': '$$ROOT'}},
+        }},
+        {'$replaceRoot': {'newRoot': '$doc'}},
+        {'$project': {'_id': 0}},
+    ]
+    df = pd.DataFrame(list(collection.aggregate(pipeline)))
+    return _addDerivedColumns(df)
+
+
+@st.cache_data(ttl=300)
 def loadProducts():
-    df = loadRawProducts()
+    df = loadLatestListings()
     df = df.sort_values('Time Added').drop_duplicates(subset=['product_id'], keep='last')
     return df
 
@@ -76,17 +106,11 @@ def loadStaleListings(staleDays=14):
     # about why this isn't auto-resolved: flagging for manual review is safer
     # than guessing. Threshold is relative to each source's own latest crawl,
     # not "today", since sources aren't crawled on a shared schedule.
-    df = loadRawProducts()
+    df = loadLatestListings()
 
-    perListing = df.groupby('listing_id').agg(**{
-        'Product Name': ('Product Name', 'last'),
-        'Brand': ('Brand', 'last'),
-        'Product Cat': ('Product Cat', 'last'),
-        'Source': ('Source', 'last'),
-        'Product URL': ('Product URL', 'last'),
-        'product_id': ('product_id', 'last'),
-        'Last Seen': ('Time Added', 'max'),
-    }).reset_index()
+    perListing = df.rename(columns={'Time Added': 'Last Seen'})[
+        ['listing_id', 'Product Name', 'Brand', 'Product Cat', 'Source', 'Product URL', 'product_id', 'Last Seen']
+    ]
 
     latestPerSource = df.groupby('Source')['Time Added'].max().rename('Source Last Crawled')
     perListing = perListing.merge(latestPerSource, on='Source', how='left')
