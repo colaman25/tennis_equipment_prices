@@ -6,7 +6,7 @@ import pandas as pd
 import streamlit as st
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent / 'Crawlers'))
-from data import loadRawProducts
+from data import loadProductHistory
 
 # Fixed slot order (validated categorical palette) so a given source always
 # gets the same color across every product page, regardless of which sources
@@ -28,8 +28,7 @@ if not product_id:
     st.page_link("app.py", label="← Back to product list")
     st.stop()
 
-history = loadRawProducts()
-history = history[history['product_id'] == product_id]
+history = loadProductHistory(product_id)
 
 if history.empty:
     st.title("Product Detail")

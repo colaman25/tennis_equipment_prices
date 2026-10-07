@@ -16,6 +16,7 @@ from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.common.action_chains import ActionChains
 
 import config
+from data import makeListingId
 
 from pymongo import MongoClient
 
@@ -185,6 +186,7 @@ def runCrawler():
                 'Brand': product_brands}
         df1 = pd.DataFrame(dict)
         df1['Source'] = SOURCE
+        df1['listing_id'] = df1['Product URL'].apply(lambda url: makeListingId(SOURCE, url))
         data_dict = df1.to_dict(orient="records")
 
         if data_dict:

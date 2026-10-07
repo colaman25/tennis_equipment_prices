@@ -53,21 +53,6 @@ def _addDerivedColumns(df):
 
 
 @st.cache_data(ttl=300)
-def loadRawProducts():
-    # Every crawl run inserts new rows rather than overwriting, so this is the
-    # full historical price log - one row per (product, crawl date), now
-    # 200k+ rows and growing every week. Only the detail page's 52-week chart
-    # genuinely needs this (and only for the one product being viewed) -
-    # everything else should use loadLatestListings() instead, which computes
-    # "latest per listing" in MongoDB rather than pulling the entire history
-    # into pandas just to throw most of it away.
-    client = MongoClient(config.mongo_cnx_string)
-    collection = client[MONGODB_NAME][MONGODB_COLLECTION]
-    df = pd.DataFrame(list(collection.find({}, {'_id': 0})))
-    return _addDerivedColumns(df)
-
-
-@st.cache_data(ttl=300)
 def loadLatestListings():
     # One row per listing (its most recent crawl only), computed server-side
     # by MongoDB instead of pulling the full multi-month history into memory.
@@ -88,6 +73,30 @@ def loadLatestListings():
         {'$project': {'_id': 0}},
     ]
     df = pd.DataFrame(list(collection.aggregate(pipeline)))
+    return _addDerivedColumns(df)
+
+
+@st.cache_data(ttl=300)
+def loadProductHistory(product_id):
+    # Full multi-crawl history for one product only, queried directly by its
+    # listing_id(s) instead of loading the entire collection just to filter
+    # down to one product in pandas afterward - which is what pushed memory
+    # past Render's 512MB limit whenever the Product Detail page was visited.
+    # Requires every document to carry a 'listing_id' field (crawlers write
+    # this going forward; pre-existing documents need the one-time backfill).
+    mapping = loadProductMapping()
+    listingIds = [lid for lid, pid in mapping.items() if pid == product_id]
+    if not listingIds:
+        # Not in product_mapping yet (e.g. crawled after the last matcher
+        # run) - the fallback elsewhere is "product_id defaults to its own
+        # listing_id", so treat the id itself as the listing_id to look up.
+        listingIds = [product_id]
+
+    client = MongoClient(config.mongo_cnx_string)
+    collection = client[MONGODB_NAME][MONGODB_COLLECTION]
+    df = pd.DataFrame(list(collection.find({'listing_id': {'$in': listingIds}}, {'_id': 0})))
+    if df.empty:
+        return df
     return _addDerivedColumns(df)
 
 

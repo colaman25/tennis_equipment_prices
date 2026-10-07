@@ -6,6 +6,7 @@ import pandas as pd
 from datetime import datetime
 
 import config
+from data import makeListingId
 
 from pymongo import MongoClient
 
@@ -164,6 +165,7 @@ def runCrawler():
                 'Product Cat': cats, 'Time Added': times, 'Product URL': urls, 'Brand': brands}
         df1 = pd.DataFrame(dict)
         df1['Source'] = SOURCE
+        df1['listing_id'] = df1['Product URL'].apply(lambda url: makeListingId(SOURCE, url))
         data_dict = df1.to_dict(orient="records")
 
         if data_dict:

@@ -7,7 +7,7 @@ from pymongo import MongoClient, UpdateOne
 from rapidfuzz import fuzz
 
 import config
-from data import loadRawProducts
+from data import loadLatestListings
 
 MONGODB_NAME = 'tennis_prod'
 MONGODB_MAPPING_COLLECTION = 'product_mapping'
@@ -201,13 +201,13 @@ def resolveProductIds(clusters, existingMapping):
 
 
 def matchProducts():
-    # One row per listing_id (every distinct real-world listing), not one row
-    # per existing product_id - the latter (loadProducts()'s view, built for
-    # the Streamlit display) collapses any product that already has multiple
-    # listings down to just its single latest-crawled row, which would make
-    # re-matching structurally blind to every other member of an existing
-    # cluster and unable to ever reconsider it.
-    df = loadRawProducts().sort_values('Time Added').drop_duplicates(subset=['listing_id'], keep='last')
+    # One row per listing_id (every distinct real-world listing), computed
+    # server-side by MongoDB - not loadProducts()'s view (built for the
+    # Streamlit display), which collapses any product that already has
+    # multiple listings down to just its single latest-crawled row, which
+    # would make re-matching structurally blind to every other member of an
+    # existing cluster and unable to ever reconsider it.
+    df = loadLatestListings()
     clusters = findClusters(df)
     existingMapping = loadExistingMapping()
     return resolveProductIds(clusters, existingMapping)
