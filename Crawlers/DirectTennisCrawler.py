@@ -14,6 +14,7 @@ from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.common.action_chains import ActionChains
+from selenium.common.exceptions import InvalidSessionIdException, TimeoutException, WebDriverException
 
 import config
 from data import makeListingId
@@ -86,7 +87,7 @@ class AtlasClient ():
        x = collection.insert_many(data)
 
 
-def runCrawler():
+def createDriver():
     chrome_options = webdriver.ChromeOptions()
     chrome_options.add_argument("--headless")
     chrome_options.add_argument('--remote-debugging-pipe')
@@ -102,101 +103,137 @@ def runCrawler():
     chrome_options.add_argument("--log-level=3")
     chrome_options.add_argument("enable-features=NetworkServiceInProcess")
     chrome_options.add_argument("disable-features=NetworkService")
+    return webdriver.Chrome(options=chrome_options)
 
-    driver = webdriver.Chrome(options=chrome_options)
 
-    driver.get("https://www.directtennis.co.uk/tennis-rackets")
+def safeGet(driver, url, maxRetries=3, retryDelay=5):
+    # A single page navigation timing out or hiccupping shouldn't take the
+    # whole crawl down with it - retry a few times before giving up.
+    for attempt in range(maxRetries):
+        try:
+            driver.get(url)
+            return
+        except (TimeoutException, WebDriverException) as e:
+            if attempt == maxRetries - 1:
+                raise
+            print(f"  navigation to {url} failed ({type(e).__name__}), retrying ({attempt + 1}/{maxRetries})...")
+            time.sleep(retryDelay)
+
+
+def runCrawler():
+    driver = createDriver()
+    safeGet(driver, "https://www.directtennis.co.uk/tennis-rackets")
 
     df = pd.DataFrame(columns=['Product Name', 'Product Price', 'Old Price', 'Product Cat', 'Time Added', 'Source', 'Product URL', 'Brand'])
     menuitem = driver.find_elements(By.XPATH, '//a[@class="menu-item-title"]')
 
     for b in range(len(menuitem)):
-        menuitem = driver.find_elements(By.XPATH, '//a[@class="menu-item-title"]')
-        topbar = driver.find_elements(By.XPATH, '//a[@class="megamenu-header"]')
-        menuitem_label = menuitem[b].text
-        scrapetime = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        try:
+            menuitem = driver.find_elements(By.XPATH, '//a[@class="menu-item-title"]')
+            topbar = driver.find_elements(By.XPATH, '//a[@class="megamenu-header"]')
+            menuitem_label = menuitem[b].text
+            scrapetime = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
 
-        for a in range(len(topbar)):
-            try:
-                hover = ActionChains(driver).move_to_element(topbar[a])
-                hover.perform()
-                time.sleep(1)
+            for a in range(len(topbar)):
+                try:
+                    hover = ActionChains(driver).move_to_element(topbar[a])
+                    hover.perform()
+                    time.sleep(1)
 
-                menuitem[b].click()
-                time.sleep(1)
-                break
-            except:
+                    menuitem[b].click()
+                    time.sleep(1)
+                    break
+                except:
+                    continue
+
+            # menuitem_label is the specific brand/collection/filter link just clicked
+            # (e.g. "Babolat"), not the actual product category. The page's own
+            # breadcrumb ("Home > Tennis Rackets > Babolat") has the real category
+            # as its second entry. Menu entries that aren't real category pages
+            # (brand quick-filters, junior size filters) don't have this breadcrumb
+            # level at all - falling back to menuitem_label for those just mislabels
+            # products as a brand name or size filter instead of a category, so skip
+            # them entirely rather than scrape them under a bogus category.
+            breadcrumb_category = driver.find_elements(By.XPATH, '//div[@class="breadcrumb-content"]//ul/li[2]/a')
+            if not breadcrumb_category:
                 continue
+            prodcat = breadcrumb_category[0].text
 
-        # menuitem_label is the specific brand/collection/filter link just clicked
-        # (e.g. "Babolat"), not the actual product category. The page's own
-        # breadcrumb ("Home > Tennis Rackets > Babolat") has the real category
-        # as its second entry. Menu entries that aren't real category pages
-        # (brand quick-filters, junior size filters) don't have this breadcrumb
-        # level at all - falling back to menuitem_label for those just mislabels
-        # products as a brand name or size filter instead of a category, so skip
-        # them entirely rather than scrape them under a bogus category.
-        breadcrumb_category = driver.find_elements(By.XPATH, '//div[@class="breadcrumb-content"]//ul/li[2]/a')
-        if not breadcrumb_category:
-            continue
-        prodcat = breadcrumb_category[0].text
+            product_names = []
+            product_prices = []
+            old_prices = []
+            product_category = []
+            time_added = []
+            product_urls = []
 
-        product_names = []
-        product_prices = []
-        old_prices = []
-        product_category = []
-        time_added = []
-        product_urls = []
+            while True:
+                # Extract every field from the same per-product container instead of
+                # separate independent queries (name/price/old-price/url) - if any one
+                # product's card is missing a sub-element (e.g. no old-price span),
+                # independent queries return mismatched counts and the lists drift out
+                # of alignment, crashing pd.DataFrame() with "All arrays must be of the
+                # same length". Keying everything off one row guarantees they stay in sync.
+                soup = BeautifulSoup(driver.page_source, 'html.parser')
+                rows = soup.select('div.col-12.product-row')
 
-        while True:
-            # Extract every field from the same per-product container instead of
-            # separate independent queries (name/price/old-price/url) - if any one
-            # product's card is missing a sub-element (e.g. no old-price span),
-            # independent queries return mismatched counts and the lists drift out
-            # of alignment, crashing pd.DataFrame() with "All arrays must be of the
-            # same length". Keying everything off one row guarantees they stay in sync.
-            soup = BeautifulSoup(driver.page_source, 'html.parser')
-            rows = soup.select('div.col-12.product-row')
+                for row in rows:
+                    name_tag = row.select_one('div.block-with-text')
+                    price_tag = row.select_one('span.new-price')
+                    old_price_tag = row.select_one('span.old-price')
+                    url_tag = row.select_one('a.product-name')
 
-            for row in rows:
-                name_tag = row.select_one('div.block-with-text')
-                price_tag = row.select_one('span.new-price')
-                old_price_tag = row.select_one('span.old-price')
-                url_tag = row.select_one('a.product-name')
+                    product_names.append(name_tag.get_text(strip=True) if name_tag else '')
+                    product_prices.append(price_tag.get_text(strip=True) if price_tag else '')
+                    old_prices.append(old_price_tag.get_text(strip=True) if old_price_tag else '')
+                    product_category.append(prodcat)
+                    time_added.append(scrapetime)
+                    product_urls.append(urljoin(driver.current_url, url_tag['href']) if url_tag and url_tag.has_attr('href') else '')
 
-                product_names.append(name_tag.get_text(strip=True) if name_tag else '')
-                product_prices.append(price_tag.get_text(strip=True) if price_tag else '')
-                old_prices.append(old_price_tag.get_text(strip=True) if old_price_tag else '')
-                product_category.append(prodcat)
-                time_added.append(scrapetime)
-                product_urls.append(urljoin(driver.current_url, url_tag['href']) if url_tag and url_tag.has_attr('href') else '')
+                try:
+                    next_button = driver.find_element(By.ID, 'btnNextTop')
+                    next_button.click()
+                    time.sleep(3)
+                except:
+                    break
 
+            product_brands = [guessBrand(name) for name in product_names]
+            product_names = [stripBrand(name, brand) for name, brand in zip(product_names, product_brands)]
+
+            dict = {'Product Name': product_names, 'Product Price': product_prices, 'Old Price': old_prices,
+                    'Product Cat': product_category, 'Time Added': time_added, 'Product URL': product_urls,
+                    'Brand': product_brands}
+            df1 = pd.DataFrame(dict)
+            df1['Source'] = SOURCE
+            df1['listing_id'] = df1['Product URL'].apply(lambda url: makeListingId(SOURCE, url))
+            data_dict = df1.to_dict(orient="records")
+
+            if data_dict:
+                atlas_client = AtlasClient(MONGOCNX, MONGODB_NAME)
+                atlas_client.insert(MONGODB_COLLECTION, data_dict)
+
+            df = pd.concat([df, df1])
+            print(f"{b + 1} of {len(menuitem)} items scraped....")
+
+            driver.execute_script("window.scrollTo(0, 0)")
+
+        except InvalidSessionIdException:
+            # The browser session itself died (e.g. Chrome crashed) - retrying
+            # on the same dead session can't work, so recreate it entirely and
+            # pick back up from the next menu item rather than losing the rest
+            # of the run.
+            print(f"  browser session died on item {b + 1} - restarting driver...")
             try:
-                next_button = driver.find_element(By.ID, 'btnNextTop')
-                next_button.click()
-                time.sleep(3)
-            except:
-                break
-
-        product_brands = [guessBrand(name) for name in product_names]
-        product_names = [stripBrand(name, brand) for name, brand in zip(product_names, product_brands)]
-
-        dict = {'Product Name': product_names, 'Product Price': product_prices, 'Old Price': old_prices,
-                'Product Cat': product_category, 'Time Added': time_added, 'Product URL': product_urls,
-                'Brand': product_brands}
-        df1 = pd.DataFrame(dict)
-        df1['Source'] = SOURCE
-        df1['listing_id'] = df1['Product URL'].apply(lambda url: makeListingId(SOURCE, url))
-        data_dict = df1.to_dict(orient="records")
-
-        if data_dict:
-            atlas_client = AtlasClient(MONGOCNX, MONGODB_NAME)
-            atlas_client.insert(MONGODB_COLLECTION, data_dict)
-
-        df = pd.concat([df, df1])
-        print(f"{b + 1} of {len(menuitem)} items scraped....")
-
-        driver.execute_script("window.scrollTo(0, 0)")
+                driver.quit()
+            except Exception:
+                pass
+            driver = createDriver()
+            safeGet(driver, "https://www.directtennis.co.uk/tennis-rackets")
+            menuitem = driver.find_elements(By.XPATH, '//a[@class="menu-item-title"]')
+        except Exception as e:
+            # Anything else (a selector that didn't match, a one-off timeout
+            # safeGet's retries didn't cover, ...) - skip this one menu item
+            # rather than losing every other category's data for it.
+            print(f"  item {b + 1} failed ({type(e).__name__}: {e}), skipping...")
 
     driver.quit()
     df.to_csv('../data/direct_tennis_products.csv', index=False)

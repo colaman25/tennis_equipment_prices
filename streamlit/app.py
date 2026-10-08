@@ -8,9 +8,14 @@ from data import loadProducts
 
 st.set_page_config(page_title="Tennis Equipment Aggregator", layout="wide")
 
-df = loadProducts()
-
 st.title("Tennis Equipment Aggregator")
+
+try:
+    df = loadProducts()
+except Exception as e:
+    print(f"[app.py] Failed to load products: {e}")
+    st.error("Unable to load product data right now. Please try again in a few minutes.")
+    st.stop()
 
 search_query = st.text_input("Search product name")
 

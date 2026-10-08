@@ -19,7 +19,12 @@ st.caption(
 
 staleDays = st.number_input("Flag listings not seen for at least this many days", min_value=1, value=14)
 
-stale = loadStaleListings(staleDays=staleDays)
+try:
+    stale = loadStaleListings(staleDays=staleDays)
+except Exception as e:
+    print(f"[2_Stale_Listings.py] Failed to load stale listings: {e}")
+    st.error("Unable to load product data right now. Please try again in a few minutes.")
+    st.stop()
 st.write(f"{len(stale)} stale listings")
 
 table_columns = ['Product Name', 'Brand', 'Product Cat', 'Source', 'Last Seen', 'Days Since Last Seen']

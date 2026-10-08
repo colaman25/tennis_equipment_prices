@@ -28,7 +28,14 @@ if not product_id:
     st.page_link("app.py", label="← Back to product list")
     st.stop()
 
-history = loadProductHistory(product_id)
+try:
+    history = loadProductHistory(product_id)
+except Exception as e:
+    print(f"[1_Product_Detail.py] Failed to load product history: {e}")
+    st.title("Product Detail")
+    st.error("Unable to load product data right now. Please try again in a few minutes.")
+    st.page_link("app.py", label="← Back to product list")
+    st.stop()
 
 if history.empty:
     st.title("Product Detail")

@@ -7,6 +7,7 @@ from bs4 import BeautifulSoup
 from selenium import webdriver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import Select
+from selenium.common.exceptions import InvalidSessionIdException, TimeoutException, WebDriverException
 
 import config
 from data import makeListingId
@@ -167,6 +168,20 @@ def waitForProductsToLoad(driver):
         time.sleep(PRODUCT_LOAD_POLL_INTERVAL)
 
 
+def safeGet(driver, url, maxRetries=3, retryDelay=5):
+    # A single page navigation timing out or hiccupping shouldn't take the
+    # whole crawl down with it - retry a few times before giving up.
+    for attempt in range(maxRetries):
+        try:
+            driver.get(url)
+            return
+        except (TimeoutException, WebDriverException) as e:
+            if attempt == maxRetries - 1:
+                raise
+            print(f"  navigation to {url} failed ({type(e).__name__}), retrying ({attempt + 1}/{maxRetries})...")
+            time.sleep(retryDelay)
+
+
 def scrapeBrandPage(driver, path, prodcat, scrapetime):
     product_names = []
     product_prices = []
@@ -176,7 +191,7 @@ def scrapeBrandPage(driver, path, prodcat, scrapetime):
     product_urls = []
     product_brands = []
 
-    driver.get(BASE_URL + path)
+    safeGet(driver, BASE_URL + path)
     waitForProductsToLoad(driver)
 
     soup = BeautifulSoup(driver.page_source, 'html.parser')
@@ -210,7 +225,7 @@ def scrapeBrandPage(driver, path, prodcat, scrapetime):
     return product_names, product_prices, old_prices, product_category, time_added, product_urls, product_brands
 
 
-def runCrawler():
+def createDriver():
     chrome_options = webdriver.ChromeOptions()
     chrome_options.add_argument("--headless")
     chrome_options.add_argument("--no-sandbox")
@@ -234,12 +249,21 @@ def runCrawler():
     driver.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument", {
         "source": "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
     })
+    return driver
 
+
+def startSession():
+    driver = createDriver()
     # The Language & VAT modal only needs dismissing once - it persists across
     # page navigations within the same browser session (confirmed by hand).
-    driver.get(BASE_URL + '/TennisRackets.html')
+    safeGet(driver, BASE_URL + '/TennisRackets.html')
     time.sleep(4)
     dismissLanguageAndVatModal(driver)
+    return driver
+
+
+def runCrawler():
+    driver = startSession()
 
     df = pd.DataFrame(columns=['Product Name', 'Product Price', 'Old Price', 'Product Cat', 'Time Added', 'Source', 'Product URL', 'Brand'])
     atlas_client = AtlasClient(MONGOCNX, MONGODB_NAME)
@@ -256,7 +280,27 @@ def runCrawler():
         product_brands = []
 
         for path in paths:
-            names, prices, olds, cats, times, purls, brands = scrapeBrandPage(driver, path, prodcat, scrapetime)
+            try:
+                names, prices, olds, cats, times, purls, brands = scrapeBrandPage(driver, path, prodcat, scrapetime)
+            except InvalidSessionIdException:
+                # The browser session itself died (e.g. Chrome crashed) -
+                # retrying on the same dead session can't work, so recreate
+                # it entirely and pick back up from the next brand page
+                # rather than losing the rest of the run.
+                print(f"  browser session died on {path} - restarting driver...")
+                try:
+                    driver.quit()
+                except Exception:
+                    pass
+                driver = startSession()
+                continue
+            except Exception as e:
+                # Anything else (a selector that didn't match, a one-off
+                # timeout safeGet's retries didn't cover, ...) - skip this one
+                # brand page rather than losing every other page's data for it.
+                print(f"  {path} failed ({type(e).__name__}: {e}), skipping...")
+                continue
+
             product_names.extend(names)
             product_prices.extend(prices)
             old_prices.extend(olds)

@@ -28,3 +28,17 @@ jobs:
         env:
           MONGO_CNX_STRING: ${{ secrets.MONGO_CNX_STRING }}
         run: python product_matcher.py
+      - name: Install MongoDB Database Tools
+        run: |
+          wget -q https://fastdl.mongodb.org/tools/db/mongodb-database-tools-ubuntu2204-x86_64-100.9.4.deb
+          sudo dpkg -i mongodb-database-tools-ubuntu2204-x86_64-100.9.4.deb
+      - name: Backup MongoDB to Backblaze B2
+        env:
+          MONGO_CNX_STRING: ${{ secrets.MONGO_CNX_STRING }}
+          B2_KEY_ID: ${{ secrets.B2_KEY_ID }}
+          B2_APPLICATION_KEY: ${{ secrets.B2_APPLICATION_KEY }}
+        run: |
+          pip install --quiet b2
+          mongodump --uri="$MONGO_CNX_STRING" --archive=backup.gz --gzip
+          b2 account authorize "$B2_KEY_ID" "$B2_APPLICATION_KEY"
+          b2 file upload tennis-equipment-backup backup.gz "backups/$(date +%Y%m%d).gz"
