@@ -78,7 +78,7 @@ def embedTexts(texts):
     return np.array(allEmbeddings)
 
 
-@st.cache_data(ttl=300)
+@st.cache_data(ttl=3600)
 def loadProductMapping():
     # listing_id -> product_id, produced offline by product_matcher.py. Not
     # every listing is necessarily in here yet (e.g. crawled after the last
@@ -93,7 +93,15 @@ def _addDerivedColumns(df):
     df['Price (numeric)'] = df['Product Price'].apply(parsePrice)
     df['Brand'] = df['Brand'].apply(normalizeBrand)
     df['Time Added'] = pd.to_datetime(df['Time Added'])
-    df['listing_id'] = df.apply(lambda r: makeListingId(r['Source'], r['Product URL']), axis=1)
+    # Vectorized equivalent of makeListingId(Source, Product URL) applied to
+    # every row - df.apply(..., axis=1) would rebuild a full row object for
+    # each of the ~26k+ rows just to read two columns out of it, which is the
+    # actual bottleneck (not the hashing). Concatenating the two columns as a
+    # single Series operation first, then only looping per-element for the
+    # part that can't be vectorized (the MD5 hash itself), skips that cost.
+    df['listing_id'] = (df['Source'] + '|' + df['Product URL']).map(
+        lambda combined: hashlib.md5(combined.encode()).hexdigest()[:12]
+    )
 
     # product_id identifies the real-world product, which can span multiple
     # listings across sources (e.g. the same racket sold by both Direct Tennis
@@ -105,7 +113,7 @@ def _addDerivedColumns(df):
     return df
 
 
-@st.cache_data(ttl=300)
+@st.cache_data(ttl=3600)
 def loadLatestListings():
     # One row per listing (its most recent crawl only), computed server-side
     # by MongoDB instead of pulling the full multi-month history into memory.
@@ -129,7 +137,7 @@ def loadLatestListings():
     return _addDerivedColumns(df)
 
 
-@st.cache_data(ttl=300)
+@st.cache_data(ttl=3600)
 def loadProductHistory(product_id):
     # Full multi-crawl history for one product only, queried directly by its
     # listing_id(s) instead of loading the entire collection just to filter
@@ -153,14 +161,14 @@ def loadProductHistory(product_id):
     return _addDerivedColumns(df)
 
 
-@st.cache_data(ttl=300)
+@st.cache_data(ttl=3600)
 def loadProducts():
     df = loadLatestListings()
     df = df.sort_values('Time Added').drop_duplicates(subset=['product_id'], keep='last')
     return df
 
 
-@st.cache_data(ttl=300)
+@st.cache_data(ttl=3600)
 def loadStaleListings(staleDays=14):
     # A listing whose own last-seen crawl date has fallen well behind its
     # source's most recent crawl is presumed delisted or moved (e.g. the
@@ -182,7 +190,7 @@ def loadStaleListings(staleDays=14):
     return stale.sort_values('Days Since Last Seen', ascending=False)
 
 
-@st.cache_data(ttl=300)
+@st.cache_data(ttl=3600)
 def loadProductEmbeddings():
     # Precomputed by generate_embeddings.py (run weekly after product_matcher.py)
     # - the app never generates product embeddings itself, only the query's.
@@ -194,7 +202,7 @@ def loadProductEmbeddings():
     return productIds, embeddings
 
 
-@st.cache_data(ttl=300)
+@st.cache_data(ttl=3600)
 def semanticSearchProductIds(query, topN=200):
     # Ranks every product with a precomputed embedding by similarity to the
     # query and returns the top N product_ids, best match first. Cached by
