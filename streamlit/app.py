@@ -4,7 +4,7 @@ from pathlib import Path
 import streamlit as st
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / 'Crawlers'))
-from data import loadProducts
+from data import loadProducts, semanticSearchProductIds
 
 st.set_page_config(page_title="Tennis Equipment Aggregator", layout="wide")
 
@@ -17,7 +17,7 @@ except Exception as e:
     st.error("Unable to load product data right now. Please try again in a few minutes.")
     st.stop()
 
-search_query = st.text_input("Search product name")
+search_query = st.text_input("Search products (e.g. \"beginner tennis racket\", \"clay court shoes\")")
 
 st.sidebar.header("Filters")
 
@@ -36,7 +36,17 @@ price_range = st.sidebar.slider("Price range (£)", min_price, max_price, (min_p
 
 filtered = df.copy()
 if search_query:
-    filtered = filtered[filtered['Product Name'].str.contains(search_query, case=False, na=False, regex=False)]
+    try:
+        matchedProductIds = semanticSearchProductIds(search_query)
+    except Exception as e:
+        print(f"[app.py] Semantic search failed: {e}")
+        st.warning("Search is temporarily unavailable - showing all products instead.")
+        matchedProductIds = None
+
+    if matchedProductIds is not None:
+        rankById = {pid: rank for rank, pid in enumerate(matchedProductIds)}
+        filtered = filtered[filtered['product_id'].isin(rankById)]
+        filtered = filtered.assign(_searchRank=filtered['product_id'].map(rankById)).sort_values('_searchRank')
 if selected_categories:
     filtered = filtered[filtered['Product Cat'].isin(selected_categories)]
 if selected_brands:

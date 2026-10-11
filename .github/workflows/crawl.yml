@@ -28,6 +28,12 @@ jobs:
         env:
           MONGO_CNX_STRING: ${{ secrets.MONGO_CNX_STRING }}
         run: python product_matcher.py
+      - name: Generate product embeddings for semantic search
+        working-directory: Crawlers
+        env:
+          MONGO_CNX_STRING: ${{ secrets.MONGO_CNX_STRING }}
+          VOYAGE_AI_KEY: ${{ secrets.VOYAGE_AI_KEY }}
+        run: python generate_embeddings.py
       - name: Install MongoDB Database Tools
         run: |
           wget -q https://fastdl.mongodb.org/tools/db/mongodb-database-tools-ubuntu2204-x86_64-100.9.4.deb

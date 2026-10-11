@@ -12,3 +12,8 @@ mongo_cnx_string = os.environ['MONGO_CNX_STRING']
 # Leave WEBSHARE_PROXY_URLS unset/empty to disable - crawlers fall back to no
 # proxy. Not used by DirectTennisCrawler or TennisWarehouseEuropeCrawler (Selenium).
 proxy_urls = [url for url in os.environ.get('WEBSHARE_PROXY_URLS', '').split(',') if url]
+
+# Voyage AI key for semantic search embeddings (generate_embeddings.py and the
+# Streamlit app's search box). Optional - only those two need it, the crawlers
+# and product_matcher.py don't.
+voyage_api_key = os.environ.get('VOYAGE_AI_KEY', '')

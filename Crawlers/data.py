@@ -1,7 +1,9 @@
 import hashlib
 import re
 
+import numpy as np
 import pandas as pd
+import requests
 import streamlit as st
 from pymongo import MongoClient
 
@@ -10,6 +12,16 @@ import config
 MONGODB_NAME = 'tennis_prod'
 MONGODB_COLLECTION = 'tennisprod'
 MONGODB_MAPPING_COLLECTION = 'product_mapping'
+MONGODB_EMBEDDINGS_COLLECTION = 'product_embeddings'
+
+# voyage-4-lite specifically - confirmed via live testing to perform as well
+# or better than the other candidates tried (voyage-3.5-lite, voyage-4-large)
+# on this catalog, and free where voyage-3.5-lite is not. Query embeddings and
+# stored product embeddings must always come from the same model and
+# dimension - they're not comparable across models - so this constant is the
+# single source of truth both generate_embeddings.py and the app import.
+VOYAGE_MODEL = 'voyage-4-lite'
+EMBEDDING_DIMENSIONS = 256
 
 
 def parsePrice(value):
@@ -26,6 +38,46 @@ def makeListingId(source, productUrl):
     return hashlib.md5(f'{source}|{productUrl}'.encode()).hexdigest()[:12]
 
 
+# Each retailer's own catalog capitalizes brand names differently (e.g. "Head"
+# vs "HEAD", "Asics" vs "ASICS") - confirmed via a live audit of every distinct
+# Brand value in production. Normalizing here (not per-crawler) fixes it for
+# every source at once, and - since product_matcher.py blocks candidate
+# matches by (Brand, Product Cat) - also stops a case mismatch from silently
+# hiding an otherwise-correct cross-source match in two different blocks.
+BRAND_CASE_MAP = {
+    'adidas': 'Adidas',
+    'asics': 'Asics',
+    'head': 'Head',
+    'nox': 'Nox',
+    'on': 'On',
+    'lucky in love': 'Lucky In Love',
+}
+
+
+def normalizeBrand(brand):
+    if not isinstance(brand, str) or not brand.strip():
+        return brand
+    stripped = brand.strip()
+    return BRAND_CASE_MAP.get(stripped.lower(), stripped)
+
+
+def embedTexts(texts):
+    # Voyage caps a single batchEmbedContents-equivalent call well above what
+    # we need per call here, but chunk defensively anyway - confirmed live
+    # that 100-128 texts per request works reliably.
+    url = 'https://api.voyageai.com/v1/embeddings'
+    headers = {'Authorization': f'Bearer {config.voyage_api_key}', 'Content-Type': 'application/json'}
+    allEmbeddings = []
+    for i in range(0, len(texts), 100):
+        chunk = texts[i:i + 100]
+        response = requests.post(url, headers=headers, json={
+            'input': chunk, 'model': VOYAGE_MODEL, 'output_dimension': EMBEDDING_DIMENSIONS,
+        }, timeout=60)
+        response.raise_for_status()
+        allEmbeddings.extend([d['embedding'] for d in response.json()['data']])
+    return np.array(allEmbeddings)
+
+
 @st.cache_data(ttl=300)
 def loadProductMapping():
     # listing_id -> product_id, produced offline by product_matcher.py. Not
@@ -39,6 +91,7 @@ def loadProductMapping():
 
 def _addDerivedColumns(df):
     df['Price (numeric)'] = df['Product Price'].apply(parsePrice)
+    df['Brand'] = df['Brand'].apply(normalizeBrand)
     df['Time Added'] = pd.to_datetime(df['Time Added'])
     df['listing_id'] = df.apply(lambda r: makeListingId(r['Source'], r['Product URL']), axis=1)
 
@@ -127,3 +180,34 @@ def loadStaleListings(staleDays=14):
     perListing['Days Since Last Seen'] = (perListing['Source Last Crawled'] - perListing['Last Seen']).dt.days
     stale = perListing[perListing['Days Since Last Seen'] >= staleDays]
     return stale.sort_values('Days Since Last Seen', ascending=False)
+
+
+@st.cache_data(ttl=300)
+def loadProductEmbeddings():
+    # Precomputed by generate_embeddings.py (run weekly after product_matcher.py)
+    # - the app never generates product embeddings itself, only the query's.
+    client = MongoClient(config.mongo_cnx_string)
+    collection = client[MONGODB_NAME][MONGODB_EMBEDDINGS_COLLECTION]
+    docs = list(collection.find({}, {'_id': 0, 'product_id': 1, 'embedding': 1}))
+    productIds = [d['product_id'] for d in docs]
+    embeddings = np.array([d['embedding'] for d in docs]) if docs else np.empty((0, EMBEDDING_DIMENSIONS))
+    return productIds, embeddings
+
+
+@st.cache_data(ttl=300)
+def semanticSearchProductIds(query, topN=200):
+    # Ranks every product with a precomputed embedding by similarity to the
+    # query and returns the top N product_ids, best match first. Cached by
+    # query text so re-searching the same term (including by a different
+    # visitor within the cache window) doesn't re-call the embedding API.
+    productIds, embeddings = loadProductEmbeddings()
+    if not productIds:
+        return []
+
+    queryEmbedding = embedTexts([query])[0]
+    queryNorm = queryEmbedding / np.linalg.norm(queryEmbedding)
+    embeddingsNorm = embeddings / np.linalg.norm(embeddings, axis=1, keepdims=True)
+    similarities = embeddingsNorm @ queryNorm
+
+    order = np.argsort(-similarities)[:topN]
+    return [productIds[i] for i in order]

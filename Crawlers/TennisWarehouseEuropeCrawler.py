@@ -78,6 +78,14 @@ CATEGORIES = {
 # brand name we can then strip off the front of the product name too.
 BRAND_SUFFIXES = [' Tennis', ' Racquets', ' Racket', ' Apparel', ' Shoes', ' Padel']
 
+# The raw GTM brand attribute is an internal catalog tag, not a clean brand
+# name - it can carry a trailing " -" qualifier ("Nike -"), a " - " separated
+# qualifier anywhere ("Nike - Accessories (All Sport)"), or a junk word
+# appended with more text sometimes following it ("Under Armour RUNNING
+# Accessorie", "Dunlop Hardgoods Ger.-Diadora") - cut at the earliest of these
+# markers, wherever it falls, not just at the very end.
+BRAND_JUNK_MARKERS = ['Hardgoods', 'Running', 'Footwear', 'Accessories', 'Accessorie', 'Germany', 'France', 'Underwear']
+
 PRODUCT_LOAD_TIMEOUT = 15
 PRODUCT_LOAD_POLL_INTERVAL = 0.5
 
@@ -113,6 +121,22 @@ class AtlasClient ():
 
 def cleanBrand(rawBrand):
     brand = rawBrand.strip()
+
+    # "Nike -", "Adidas -", "Nike - Accessories (All Sport)" - a dash
+    # introduces an internal catalog qualifier, not part of the brand name.
+    if ' - ' in brand:
+        brand = brand.split(' - ')[0].strip()
+    elif brand.endswith(' -'):
+        brand = brand[:-2].strip()
+
+    lowerBrand = brand.lower()
+    cutIndex = len(brand)
+    for marker in BRAND_JUNK_MARKERS:
+        idx = lowerBrand.find(marker.lower())
+        if idx != -1:
+            cutIndex = min(cutIndex, idx)
+    brand = brand[:cutIndex].strip()
+
     for suffix in BRAND_SUFFIXES:
         if brand.endswith(suffix):
             return brand[:-len(suffix)].strip()
