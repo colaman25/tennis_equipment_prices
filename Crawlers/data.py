@@ -198,7 +198,11 @@ def loadProductEmbeddings():
     collection = client[MONGODB_NAME][MONGODB_EMBEDDINGS_COLLECTION]
     docs = list(collection.find({}, {'_id': 0, 'product_id': 1, 'embedding': 1}))
     productIds = [d['product_id'] for d in docs]
-    embeddings = np.array([d['embedding'] for d in docs]) if docs else np.empty((0, EMBEDDING_DIMENSIONS))
+    # float32 instead of numpy's float64 default - half the memory for the
+    # same cosine-similarity ranking quality, which matters on Render's
+    # 512MB limit now that this matrix is held in memory for the full cache TTL.
+    embeddings = (np.array([d['embedding'] for d in docs], dtype=np.float32)
+                  if docs else np.empty((0, EMBEDDING_DIMENSIONS), dtype=np.float32))
     return productIds, embeddings
 
 
@@ -214,8 +218,14 @@ def semanticSearchProductIds(query, topN=200):
 
     queryEmbedding = embedTexts([query])[0]
     queryNorm = queryEmbedding / np.linalg.norm(queryEmbedding)
-    embeddingsNorm = embeddings / np.linalg.norm(embeddings, axis=1, keepdims=True)
-    similarities = embeddingsNorm @ queryNorm
+    # Avoid ever materializing a normalized copy of the full embeddings matrix
+    # (same size as `embeddings` itself, so a second full copy in memory at
+    # once) - only the query needs normalizing; dividing the raw dot products
+    # by the matrix's per-row norms afterward is mathematically identical and
+    # only ever allocates small, N-length arrays instead.
+    dotProducts = embeddings @ queryNorm
+    matrixNorms = np.linalg.norm(embeddings, axis=1)
+    similarities = dotProducts / matrixNorms
 
     order = np.argsort(-similarities)[:topN]
     return [productIds[i] for i in order]
