@@ -73,26 +73,40 @@ class AtlasClient ():
        x = collection.insert_many(data)
 
 
-def getProxies():
+def getProxies(excluded=frozenset()):
     if not config.proxy_urls:
-        return None
-    proxy = random.choice(config.proxy_urls)
-    return {'http': proxy, 'https': proxy}
+        return None, None
+    available = [p for p in config.proxy_urls if p not in excluded]
+    if not available:
+        return None, None
+    proxy = random.choice(available)
+    return proxy, {'http': proxy, 'https': proxy}
 
 
 def requestWithRetry(session, method, url, **kwargs):
-    # Individual proxies in the pool can be temporarily down/slow - retry with
-    # a freshly picked proxy rather than letting one bad proxy kill the run.
+    # Individual proxies in the pool can be temporarily down - exclude a
+    # proxy from this call's own retries once it's failed, so a run of bad
+    # luck can't keep redrawing the same dead subset (with random.choice's
+    # replacement) while working proxies in the pool go untried. Confirmed
+    # live that ~40% of the pool can be down at once, which made the old
+    # fixed 5-retry-with-replacement approach fail a full crawl outright.
+    # Retrying once per proxy in the pool means this only gives up if every
+    # single proxy is down, not just an unlucky handful of draws.
     last_exception = None
-    for attempt in range(MAX_PROXY_RETRIES):
+    triedProxies = set()
+    maxAttempts = max(MAX_PROXY_RETRIES, len(config.proxy_urls))
+    for attempt in range(maxAttempts):
+        proxyUrl, proxyDict = getProxies(excluded=triedProxies)
+        if proxyUrl:
+            triedProxies.add(proxyUrl)
         try:
-            response = session.request(method, url, proxies=getProxies(), **kwargs)
+            response = session.request(method, url, proxies=proxyDict, **kwargs)
             response.raise_for_status()
             return response
         except (requests.exceptions.ProxyError, requests.exceptions.ConnectionError,
                 requests.exceptions.Timeout) as e:
             last_exception = e
-            print(f"  proxy request failed ({type(e).__name__}), retrying ({attempt + 1}/{MAX_PROXY_RETRIES})...")
+            print(f"  proxy request failed ({type(e).__name__}), retrying ({attempt + 1}/{maxAttempts})...")
             time.sleep(1)
     raise last_exception
 
